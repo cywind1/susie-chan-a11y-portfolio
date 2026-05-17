@@ -45,3 +45,6 @@ yarn-error.log*
 
 # Contentlayer
 .contentlayer
+
+# Accessibility testing
+a11y-tests/venv/
