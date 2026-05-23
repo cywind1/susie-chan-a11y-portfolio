@@ -5,6 +5,11 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from axe_selenium_python import Axe
 
+# Helps build full URLs from relative links, inspect URL parts, and remove page fragments like "#section"
+from urllib.parse import urljoin, urlparse, urldefrag
+# Provides an efficient first-in, first-out queue for crawling pages
+from collections import deque
+
 # ============================================================
 # CONFIGURATION
 # ============================================================
@@ -99,6 +104,68 @@ def create_driver():
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     return webdriver.Chrome(options=options)
+
+        
+# ============================================================
+# INTERNAL LINK CRAWLER
+# ============================================================
+
+def discover_pages(start_url, max_pages=50):
+    """
+    Crawl same-domain links starting from start_url.
+    Returns a sorted list of internal pages to audit.
+    """
+    driver = create_driver()
+    visited = set()
+    queue = deque([start_url])
+
+    start_domain = urlparse(start_url).netloc
+
+    try:
+        while queue and len(visited) < max_pages:
+            current_url = queue.popleft()
+
+            if current_url in visited:
+                continue
+
+            driver.get(current_url)
+
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.TAG_NAME, "body"))
+            )
+
+            visited.add(current_url)
+
+            links = driver.find_elements(By.TAG_NAME, "a")
+
+            for link in links:
+                href = link.get_attribute("href")
+
+                if not href:
+                    continue
+
+                # Remove fragments like /blog/#section
+                href, _ = urldefrag(href)
+
+                # Correctly resolve relative links like /blog/
+                absolute_url = urljoin(current_url, href)
+
+                parsed = urlparse(absolute_url)
+
+                # Skip external domains, mailto, tel, javascript, etc.
+                if parsed.scheme not in ("http", "https"):
+                    continue
+
+                if parsed.netloc != start_domain:
+                    continue
+
+                if absolute_url not in visited:
+                    queue.append(absolute_url)
+
+        return sorted(visited)
+
+    finally:
+        driver.quit()
 
 
 # ============================================================
@@ -211,4 +278,11 @@ def run_audit(url):
 # ============================================================
 # RUN
 # ============================================================
-run_audit(URL)
+pages = discover_pages(URL)
+
+print(f"\nDiscovered {len(pages)} page(s):")
+for page in pages:
+    print(f"  - {page}")
+
+for page in pages:
+    run_audit(page)
