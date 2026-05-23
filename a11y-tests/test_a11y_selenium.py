@@ -17,10 +17,10 @@ LOCAL_URL    = "http://localhost:3000"
 DEPLOYED_URL = "https://susie-chan-a11y-portfolio.vercel.app"
 
 # Usage:
-#   python test_a11y.py          → tests LOCAL
-#   python test_a11y.py local    → tests LOCAL
-#   python test_a11y.py deployed → tests DEPLOYED
-#   python test_a11y.py https:// → tests any custom URL
+#   python test_a11y_selenium.py                   → tests LOCAL with wcag21aa (default)
+#   python test_a11y_selenium.py local wcag22aa    → tests LOCAL with wcag22aa
+#   python test_a11y_selenium.py deployed wcag22aa → tests DEPLOYED with wcag22aa
+#   python test_a11y_selenium.py https:// wcag22aa → tests any custom URL with wcag22aa
 
 arg = sys.argv[1] if len(sys.argv) > 1 else "local"
 
@@ -31,6 +31,28 @@ elif arg == "deployed":
 else:
     URL = arg  # custom URL passed directly
 
+
+# ============================================================
+# WCAG VERSION OPTIONS
+# Choose which WCAG rules Axe should run
+# ============================================================
+WCAG_PRESETS = {
+    "wcag2a": ["wcag2a"],
+    "wcag2aa": ["wcag2a", "wcag2aa"],
+    "wcag21aa": ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"],
+    "wcag22aa": ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22a", "wcag22aa"],
+}
+
+DEFAULT_WCAG = "wcag21aa"
+wcag_arg = sys.argv[2] if len(sys.argv) > 2 else DEFAULT_WCAG
+
+if wcag_arg not in WCAG_PRESETS:
+    print(f"Invalid WCAG option: {wcag_arg}")
+    print(f"Choose one of: {', '.join(WCAG_PRESETS.keys())}")
+    sys.exit(1)
+
+WCAG_VERSION = wcag_arg
+WCAG_TAGS = WCAG_PRESETS[WCAG_VERSION]
 
 # ============================================================
 # HINT ENGINE
@@ -171,7 +193,7 @@ def discover_pages(start_url, max_pages=50):
 # ============================================================
 # MAIN AUDIT
 # ============================================================
-def run_audit(url):
+def run_audit(url, wcag_version, wcag_tags):
     driver = create_driver()
 
     try:
@@ -179,6 +201,7 @@ def run_audit(url):
         print(f"  🔍 Accessibility Audit")
         print(f"  URL: {url}")
         print(f"{'='*60}\n")
+        print(f"  WCAG: {wcag_version.upper()}")
 
         driver.get(url)
 
@@ -189,7 +212,14 @@ def run_audit(url):
 
         axe = Axe(driver)
         axe.inject()
-        results = axe.run()
+        axe_options = {
+            "runOnly": {
+                "type": "tag",
+                "values": wcag_tags,
+            }
+        }
+                
+        results = axe.run(options=axe_options)
 
         violations = results["violations"]
 
@@ -285,4 +315,4 @@ for page in pages:
     print(f"  - {page}")
 
 for page in pages:
-    run_audit(page)
+    run_audit(page, WCAG_VERSION, WCAG_TAGS)
