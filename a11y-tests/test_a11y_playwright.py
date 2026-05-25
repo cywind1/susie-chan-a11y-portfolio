@@ -20,7 +20,6 @@ AXE_CDN = "https://cdnjs.cloudflare.com/ajax/libs/axe-core/4.10.2/axe.min.js"
 DEFAULT_WCAG = "wcag21aa"
 DEFAULT_MAX_PAGES = 50
 
-# Choose which WCAG rules Axe should run.
 WCAG_PRESETS = {
     "wcag2a": ["wcag2a"],
     "wcag2aa": ["wcag2a", "wcag2aa"],
@@ -37,6 +36,8 @@ class AuditConfig:
     max_pages: int
     headed: bool
     output: Path | None
+    project_root: Path | None
+    debug: bool
 
 
 # ============================================================
@@ -75,6 +76,16 @@ def parse_args() -> AuditConfig:
         type=Path,
         help="Optional JSON report path for full axe results.",
     )
+    parser.add_argument(
+        "--project-root",
+        type=Path,
+        help="Path to source root to auto-detect which file contains the bug.",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Print debug info for class index matching.",
+    )
     args = parser.parse_args()
 
     target_map = {
@@ -90,40 +101,117 @@ def parse_args() -> AuditConfig:
         max_pages=args.max_pages,
         headed=args.headed,
         output=args.output,
+        project_root=args.project_root,
+        debug=args.debug,
     )
 
 
 # ============================================================
-# HINT ENGINE
-# Layer 1: Generic, works on any website
-# Layer 2: Project specific, edit per project
+# CLASS INDEX
+# Scans source files and maps className strings to file paths.
+# Handles: className="...", className={`...`}, className={'...'}
 # ============================================================
-def get_hint(html_snippet: str, classes: str) -> str:
-    html_snippet = html_snippet.lower()
-    classes = classes.lower()
+def build_class_index(project_root: Path) -> dict[str, str]:
+    """Scan source files and map className strings to their relative file paths."""
+    import re
 
-    if any(x in html_snippet for x in ["<header", "site-header"]):
+    index = {}
+    extensions = ("*.tsx", "*.jsx", "*.ts", "*.js")
+    skip_dirs = {"node_modules", ".next", ".git", "dist", ".yarn"}
+
+    # Matches className="...", className={`...`}, className={'...'}, className={"..."}
+    pattern = re.compile(r'className=["\'{`]([^"\'{`\n]+)["\'{`]')
+
+    for ext in extensions:
+        for filepath in project_root.rglob(ext):
+            if any(p in filepath.parts for p in skip_dirs):
+                continue
+            try:
+                content = filepath.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            for match in pattern.finditer(content):
+                class_str = match.group(1).strip()
+                if class_str:
+                    rel = str(filepath.relative_to(project_root))
+                    index[class_str] = rel
+
+    return index
+
+
+# ============================================================
+# HINT ENGINE
+# Layer 1: Auto-detect from source index (most accurate)
+# Layer 2: Generic HTML/class pattern matching
+# Layer 3: Project-specific fallbacks
+# ============================================================
+def get_hint(
+    html_snippet: str,
+    classes: str,
+    class_index: dict[str, str] | None = None,
+    debug: bool = False,
+) -> str:
+    # Layer 1: Auto-detect from indexed source files
+    if class_index:
+        classes_set = set(classes.strip().split())
+
+        if debug:
+            print(f"\n  DEBUG: DOM classes ({len(classes_set)}): {classes_set}")
+            print(f"  DEBUG: Searching {len(class_index)} index entries...")
+
+        best_match: tuple[int, str] | None = None
+        for key, filepath in class_index.items():
+            key_set = set(key.strip().split())
+            overlap = len(classes_set & key_set)
+            if overlap >= 2:
+                if best_match is None or overlap > best_match[0]:
+                    best_match = (overlap, filepath)
+
+        if debug:
+            if best_match:
+                print(f"  DEBUG: Best match ({best_match[0]} classes overlap) -> {best_match[1]}")
+            else:
+                print("  DEBUG: No index match (overlap < 2). Falling back to pattern matching.")
+                # Show closest misses to help diagnose
+                scored = []
+                for key, filepath in class_index.items():
+                    key_set = set(key.strip().split())
+                    overlap = len(classes_set & key_set)
+                    if overlap > 0:
+                        scored.append((overlap, filepath, key[:60]))
+                for score, fp, key in sorted(scored, reverse=True)[:5]:
+                    print(f"  DEBUG:   overlap={score} [{fp}] {key}")
+
+        if best_match:
+            return f"Look in: {best_match[1]}"
+
+    # Layer 2: Generic pattern matching
+    html_lower = html_snippet.lower()
+    classes_lower = classes.lower()
+
+    if any(x in html_lower for x in ["<header", "site-header"]):
         return "Likely in: header component"
-    if any(x in html_snippet for x in ["<footer", "copyright", "©"]):
+    if any(x in html_lower for x in ["<footer", "copyright", "©"]):
         return "Likely in: footer component"
-    if any(x in html_snippet for x in ["<button", "submit", "btn"]):
+    if any(x in html_lower for x in ["<button", "submit", "btn"]):
         return "Likely in: button or form component"
-    if any(x in html_snippet for x in ["<img", "image", "photo"]):
+    if any(x in html_lower for x in ["<img", "image", "photo"]):
         return "Likely in: image component or content"
-    if any(x in html_snippet for x in ["<input", "<form", "<label"]):
+    if any(x in html_lower for x in ["<input", "<form", "<label"]):
         return "Likely in: form component"
-    if any(x in html_snippet for x in ["<html", "lang", "<title"]):
+    if any(x in html_lower for x in ["<html", "lang", "<title"]):
         return "Likely in: root layout file"
-    if any(x in html_snippet for x in ["<a ", "href"]):
+    if any(x in html_lower for x in ["<a ", "href"]):
         return "Likely in: link or navigation component"
-    if "nav" in html_snippet or "nav" in classes:
+    if "nav" in html_lower or "nav" in classes_lower:
         return "Likely in: navigation component"
 
-    if "newsletter" in html_snippet or "sign up" in html_snippet:
+    # Layer 3: Project-specific fallbacks
+    if "newsletter" in html_lower or "sign up" in html_lower:
         return "Look in: components/NewsletterForm.tsx"
-    if "no-scrollbar" in classes:
+    if "no-scrollbar" in classes_lower:
         return "Look in: components/Header.tsx"
-    if "tags/" in html_snippet:
+    if "tags/" in html_lower:
         return "Look in: components/Tag.tsx"
 
     return "Inspect element in DevTools to locate"
@@ -135,6 +223,8 @@ def get_search_term(html: str) -> str:
         start = html.find(marker) + len(marker)
         end = html.find('"', start)
         classes = html[start:end].split()
+        if len(classes) >= 2:
+            return " ".join(classes[:3])
         if classes:
             return classes[0]
 
@@ -151,29 +241,19 @@ def load_axe_source() -> str:
 
 
 def wait_for_page(page: Page, url: str) -> None:
-    # Open the page and wait until the initial HTML document is loaded.
-    # This is faster and more reliable than waiting for every asset to finish.
     page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-
-    # Wait until the <body> exists in the DOM.
-    # "attached" is important because some pages may briefly hide <body>.
     page.wait_for_selector("body", state="attached", timeout=10_000)
 
     try:
-        # Give deployed/production pages a short chance to finish network activity.
-        # Local dev servers may keep connections open, so this must be optional.
         page.wait_for_load_state("networkidle", timeout=3_000)
     except PlaywrightTimeoutError:
         pass
 
     try:
-        # Wait briefly for links because the crawler discovers subpages from <a href>.
-        # Some valid pages have no links, so the scan should continue if none appear.
         page.wait_for_selector("a[href]", state="attached", timeout=3_000)
     except PlaywrightTimeoutError:
         pass
 
-    # Small buffer for React/Next.js hydration before axe scans or links are collected.
     page.wait_for_timeout(500)
 
 
@@ -224,7 +304,15 @@ def discover_pages(page: Page, start_url: str, max_pages: int) -> list[str]:
 # ============================================================
 # MAIN AUDIT
 # ============================================================
-def run_audit(page: Page, axe_source: str, url: str, wcag_version: str, wcag_tags: list[str]) -> dict[str, Any]:
+def run_audit(
+    page: Page,
+    axe_source: str,
+    url: str,
+    wcag_version: str,
+    wcag_tags: list[str],
+    class_index: dict[str, str] | None = None,
+    debug: bool = False,
+) -> dict[str, Any]:
     print(f"\n{'=' * 60}")
     print("  Accessibility Audit")
     print(f"  URL: {url}")
@@ -237,10 +325,7 @@ def run_audit(page: Page, axe_source: str, url: str, wcag_version: str, wcag_tag
     results = page.evaluate(
         """
         async (wcagTags) => await axe.run(document, {
-            runOnly: {
-                type: "tag",
-                values: wcagTags
-            }
+            runOnly: { type: "tag", values: wcagTags }
         })
         """,
         wcag_tags,
@@ -254,7 +339,7 @@ def run_audit(page: Page, axe_source: str, url: str, wcag_version: str, wcag_tag
         print(f"  FAIL: Found {len(violations)} violation(s):\n")
 
     for violation in violations:
-        print_violation(page, violation)
+        print_violation(page, violation, class_index, debug)
 
     print_summary(url, violations)
     print("  Audit complete.\n")
@@ -262,7 +347,12 @@ def run_audit(page: Page, axe_source: str, url: str, wcag_version: str, wcag_tag
     return results
 
 
-def print_violation(page: Page, violation: dict[str, Any]) -> None:
+def print_violation(
+    page: Page,
+    violation: dict[str, Any],
+    class_index: dict[str, str] | None = None,
+    debug: bool = False,
+) -> None:
     print(f"{'=' * 60}")
     print(f"  Rule:     {violation['id']}")
     print(f"  Impact:   {violation.get('impact', 'unknown').upper()}")
@@ -275,11 +365,16 @@ def print_violation(page: Page, violation: dict[str, Any]) -> None:
         print(f"  Element {index}:")
         print(f"    HTML:    {html[:120]}")
         print(f"    Summary: {node.get('failureSummary', '').strip()}")
-        print_debug_tip(page, node)
+        print_debug_tip(page, node, class_index, debug)
         print()
 
 
-def print_debug_tip(page: Page, node: dict[str, Any]) -> None:
+def print_debug_tip(
+    page: Page,
+    node: dict[str, Any],
+    class_index: dict[str, str] | None = None,
+    debug: bool = False,
+) -> None:
     target = node.get("target") or []
     selector = target[0] if target and isinstance(target[0], str) else None
 
@@ -288,7 +383,7 @@ def print_debug_tip(page: Page, node: dict[str, Any]) -> None:
         return
 
     try:
-        location = page.locator(selector).first.evaluate(   # ← removed ()
+        location = page.locator(selector).first.evaluate(
             """
             el => ({
                 id: el.id || "(no id)",
@@ -303,7 +398,7 @@ def print_debug_tip(page: Page, node: dict[str, Any]) -> None:
 
     html = node.get("html", "")
     classes = location["className"]
-    hint = get_hint(html, classes)
+    hint = get_hint(html, classes, class_index, debug)
     search_term = get_search_term(html)
 
     print(f"    Tag:     <{location['tagName'].lower()}>")
@@ -349,8 +444,27 @@ def main() -> int:
             for discovered_page in pages:
                 print(f"  - {discovered_page}")
 
+            class_index = None
+            if config.project_root:
+                class_index = build_class_index(config.project_root)
+                print(f"\n  Indexed {len(class_index)} className entries from {config.project_root}")
+
+                if config.debug:
+                    print("\n  DEBUG: Sample index entries:")
+                    for k, v in list(class_index.items())[:10]:
+                        print(f"    [{v}] {k[:80]}")
+                    print()
+
             for discovered_page in pages:
-                result = run_audit(page, axe_source, discovered_page, config.wcag_version, config.wcag_tags)
+                result = run_audit(
+                    page,
+                    axe_source,
+                    discovered_page,
+                    config.wcag_version,
+                    config.wcag_tags,
+                    class_index,
+                    config.debug,
+                )
                 all_results.append({"url": discovered_page, "results": result})
         finally:
             browser.close()
