@@ -3,16 +3,17 @@ const siteMetadata = {
   title: 'Homepage | Susie Chan – Digital Accessibility Portfolio ',
   author: 'Susie Ching Ying Chan',
   headerTitle: 'Susie Chan',
-  description: 'Entdecken Sie das Portfolio von Susie Chan, Expertin für digitale Barrierefreiheit mit Schwerpunkt auf der Konformität nach EN 301 549. Erfahren Sie mehr über Audits im Rahmen des BFSG / EAA und der WAD, technische Anforderungen an die Barrierefreiheit sowie die Gestaltung inklusiver digitaler Räume.',
-  language: 'en-us',
+  description:
+    'Entdecken Sie das Portfolio von Susie Chan, Expertin für digitale Barrierefreiheit mit Schwerpunkt auf der Konformität nach EN 301 549. Erfahren Sie mehr über Audits im Rahmen des BFSG / EAA und der WAD, technische Anforderungen an die Barrierefreiheit sowie die Gestaltung inklusiver digitaler Räume.',
+  language: 'de-DE',
   theme: 'system', // system, dark or light
   siteUrl: 'https://susie-chan-a11y.vercel.app',
   siteLogo: `${process.env.BASE_PATH || ''}/static/images/logo.png`,
   socialBanner: `${process.env.BASE_PATH || ''}/static/images/susie-homepage-banner.png`,
   email: 'susiechan.a11y@gmail.com',
   github: 'https://github.com/cywind1',
-  linkedin: 'https://www.linkedin.com/in/susie-ching-ying-chan-24b696148/', 
-  locale: 'en-US',
+  linkedin: 'https://www.linkedin.com/in/susie-ching-ying-chan-24b696148/',
+  locale: 'de-DE',
   // set to true if you want a navbar fixed to the top
   stickyNav: false,
   analytics: {
@@ -71,7 +72,7 @@ const siteMetadata = {
       // example: https://giscus.app/themes/custom_example.css
       themeURL: '',
       // This corresponds to the `data-lang="en"` in giscus's configurations
-      lang: 'en',
+      lang: 'de',
     },
   },
   search: {
