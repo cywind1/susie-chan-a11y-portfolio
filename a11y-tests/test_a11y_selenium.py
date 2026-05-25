@@ -5,10 +5,14 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from axe_selenium_python import Axe
 
-# Helps build full URLs from relative links, inspect URL parts, and remove page fragments like "#section"
-from urllib.parse import urljoin, urlparse, urldefrag
+# Helps build and inspect URLs, remove fragments, and rebuild normalized URLs
+from urllib.parse import urljoin, urlparse, urldefrag, urlunparse
+
+from selenium.common.exceptions import TimeoutException
+
 # Provides an efficient first-in, first-out queue for crawling pages
 from collections import deque
+
 
 # ============================================================
 # CONFIGURATION
@@ -129,60 +133,128 @@ def create_driver():
 
         
 # ============================================================
-# INTERNAL LINK CRAWLER
+# PAGE DISCOVERY
+# Automatically finds internal pages before running Axe.
+# It opens each page in Selenium, collects same-domain links,
+# then visits those links until all reachable pages are found.
+# Works for both localhost and the deployed site.
 # ============================================================
+def wait_for_page(driver, url):
+    """
+    Opens a page and waits until it is safe to read links or run Axe.
+    This is useful for React/Next.js pages because links may appear
+    after JavaScript hydration, not immediately after driver.get().
+    """
+    driver.get(url)
+
+    # Wait until the browser has loaded the initial HTML document.
+    WebDriverWait(driver, 20).until(
+        lambda d: d.execute_script("return document.readyState") in ("interactive", "complete")
+    )
+
+    # Wait until the <body> element exists.
+    WebDriverWait(driver, 10).until(
+        EC.presence_of_element_located((By.TAG_NAME, "body"))
+    )
+
+    try:
+        # Wait briefly for links to appear.
+        # Some valid pages may have no links, so timeout is allowed.
+        WebDriverWait(driver, 3).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "a[href]"))
+        )
+    except TimeoutException:
+        pass
+
+    # Give React/Next.js a short extra moment to finish hydration
+    # before we collect links or run the accessibility scan.
+    driver.execute_async_script("""
+        const done = arguments[arguments.length - 1];
+        setTimeout(done, 500);
+    """)
+
+
+def normalize_internal_url(current_url, href, start_domain):
+    """
+    Converts a link href into a clean absolute URL.
+
+    Example:
+    current_url = "http://localhost:3000/"
+    href = "/projects/"
+    result = "http://localhost:3000/projects/"
+
+    Returns None for links that should not be crawled.
+    """
+    if not href:
+        return None
+
+    # Remove page fragments like "#contact" so the same page is not scanned twice.
+    href, _ = urldefrag(href)
+
+    # Convert relative links like "/blog/" into full URLs.
+    absolute_url = urljoin(current_url, href)
+    parsed = urlparse(absolute_url)
+
+    # Skip mailto:, tel:, javascript:, and other non-web links.
+    if parsed.scheme not in ("http", "https"):
+        return None
+
+    # Skip external websites. Only crawl the original domain.
+    if parsed.netloc != start_domain:
+        return None
+
+    return absolute_url
+
 
 def discover_pages(start_url, max_pages=50):
     """
-    Crawl same-domain links starting from start_url.
-    Returns a sorted list of internal pages to audit.
+    Crawls the site and returns all internal pages found.
+
+    It uses a queue:
+    - visited = pages already checked
+    - queued = pages waiting to be checked
+    - queue = the crawl order
     """
     driver = create_driver()
-    visited = set()
-    queue = deque([start_url])
 
+    visited = set()
+    queued = {start_url}
+    queue = deque([start_url])
     start_domain = urlparse(start_url).netloc
 
     try:
         while queue and len(visited) < max_pages:
+            # Take the next page waiting to be crawled.
             current_url = queue.popleft()
 
+            # Skip if this page was already crawled.
             if current_url in visited:
                 continue
 
-            driver.get(current_url)
+            try:
+                # Open the page and wait until links are available.
+                wait_for_page(driver, current_url)
+            except Exception as error:
+                print(f"  WARN: Could not crawl {current_url}: {error}")
+                continue
 
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.TAG_NAME, "body"))
-            )
-
+            # Mark the page as crawled.
             visited.add(current_url)
 
-            links = driver.find_elements(By.TAG_NAME, "a")
+            # Collect every rendered <a href=""> link on the page.
+            hrefs = driver.execute_script("""
+                return Array.from(document.querySelectorAll('a[href]'))
+                    .map(a => a.href);
+            """)
 
-            for link in links:
-                href = link.get_attribute("href")
+            for href in hrefs:
+                # Convert each link into a same-domain absolute URL.
+                next_url = normalize_internal_url(current_url, href, start_domain)
 
-                if not href:
-                    continue
-
-                # Remove fragments like /blog/#section
-                href, _ = urldefrag(href)
-
-                # Correctly resolve relative links like /blog/
-                absolute_url = urljoin(current_url, href)
-
-                parsed = urlparse(absolute_url)
-
-                # Skip external domains, mailto, tel, javascript, etc.
-                if parsed.scheme not in ("http", "https"):
-                    continue
-
-                if parsed.netloc != start_domain:
-                    continue
-
-                if absolute_url not in visited:
-                    queue.append(absolute_url)
+                # Add new internal pages to the crawl queue.
+                if next_url and next_url not in visited and next_url not in queued:
+                    queued.add(next_url)
+                    queue.append(next_url)
 
         return sorted(visited)
 
@@ -203,12 +275,7 @@ def run_audit(url, wcag_version, wcag_tags):
         print(f"{'='*60}\n")
         print(f"  WCAG: {wcag_version.upper()}")
 
-        driver.get(url)
-
-        # Wait for page to fully load before scanning
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.TAG_NAME, "body"))
-        )
+        wait_for_page(driver, url)
 
         axe = Axe(driver)
         axe.inject()
@@ -308,6 +375,7 @@ def run_audit(url, wcag_version, wcag_tags):
 # ============================================================
 # RUN
 # ============================================================
+
 pages = discover_pages(URL)
 
 print(f"\nDiscovered {len(pages)} page(s):")
