@@ -288,7 +288,7 @@ def print_debug_tip(page: Page, node: dict[str, Any]) -> None:
         return
 
     try:
-        location = page.locator(selector).first().evaluate(
+        location = page.locator(selector).first.evaluate(   # ← removed ()
             """
             el => ({
                 id: el.id || "(no id)",
